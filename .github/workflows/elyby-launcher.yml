@@ -1,0 +1,65 @@
+name: Build Ely.by launcher
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version, for example 0.2.24-elyby.3'
+        required: true
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            asset: horizon-launcher-linux-x86_64.tar.gz
+            binary: horizon-launcher
+          - os: windows-latest
+            asset: horizon-launcher-windows-x64.zip
+            binary: horizon-launcher.exe
+            rustflags: '-C target-feature=+crt-static'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      HORIZON_LAUNCHER_VERSION: ${{ inputs.version }}
+      HORIZON_ELYBY_UPDATE_REPO: ${{ github.repository }}
+      HORIZON_MSA_CLIENT_ID: '331e08f8-172d-43b9-835a-3108c2fcdbf3'
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: launcher
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate version
+        run: '[[ "$HORIZON_LAUNCHER_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-elyby\.[0-9]+$ ]]'
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libfontconfig-dev libvulkan-dev libasound2-dev
+      - run: cargo test --locked --release --lib --test elyby_online
+      - run: cargo build --locked --release
+      - name: Package
+        env:
+          BINARY: ${{ matrix.binary }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p out payload
+          cp "target/release/$BINARY" ELYBY.md ../LICENSE payload/
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            (cd payload && tar czf "../out/$ASSET" .)
+          else
+            (cd payload && 7z a "../out/$ASSET" .)
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: launcher/out/*
+# Archives are signed and published from the maintainer's machine with
+# tools/ci/publish_elyby.sh. The signing key never enters this workflow.
