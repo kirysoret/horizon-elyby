@@ -338,6 +338,13 @@ pub fn wrap(cmd: Command, launch: &Launch) -> Command {
     }
     out.envs(switch_env(launch, &found));
     out.envs(&launch.env);
+    // The session issuer cannot be changed by instance variables after attach_session chose it.
+    if let Some((_, Some(provider))) = cmd
+        .get_envs()
+        .find(|(key, _)| *key == crate::elyby_discovery::PROVIDER_ENV)
+    {
+        out.env(crate::elyby_discovery::PROVIDER_ENV, provider);
+    }
     out
 }
 

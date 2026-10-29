@@ -8,6 +8,12 @@ impl Launcher {
     /// The chip's two lines: the name that plays, and how.
     pub(super) fn who_plays(&self) -> (String, &'static str) {
         match self.accounts.player() {
+            Player::ElyBy(_) => (
+                self.accounts
+                    .selected_elyby()
+                    .map_or_else(String::new, |a| a.name.clone()),
+                "Ely.by · online",
+            ),
             Player::Microsoft(_) => (
                 self.accounts
                     .selected()
@@ -48,6 +54,13 @@ impl Launcher {
                 )
             })
             .collect();
+        out.extend(self.accounts.elyby.iter().map(|a| {
+            (
+                Player::ElyBy(a.uuid.clone()),
+                a.name.clone(),
+                "Ely.by · online",
+            )
+        }));
         out.extend(
             self.accounts
                 .offline

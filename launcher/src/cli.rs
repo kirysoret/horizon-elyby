@@ -990,6 +990,7 @@ fn json(value: serde_json::Value) {
 
 /// Runs a game process in this terminal and reports how it ended.
 fn attached(mut cmd: Command) -> Result<(), String> {
+    let _discovery = horizon_launcher::elyby_discovery::configure(&mut cmd)?;
     let status = cmd
         .status()
         .map_err(|e| format!("Could not start {:?}: {e}", cmd.get_program()))?;

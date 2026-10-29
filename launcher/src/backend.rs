@@ -570,7 +570,7 @@ pub(crate) fn download(
     })
 }
 
-fn unpack(archive: &Path, url: &str, to: &Path) -> Result<(), String> {
+pub(crate) fn unpack(archive: &Path, url: &str, to: &Path) -> Result<(), String> {
     let file = fs::File::open(archive).map_err(|e| e.to_string())?;
     if url.ends_with(".tar.gz") {
         tar::Archive::new(flate2::read::GzDecoder::new(file))
@@ -1271,6 +1271,14 @@ fn download_for_owner(
     log: &dyn Fn(String),
 ) -> Result<(), String> {
     let mut accounts = account::Accounts::load();
+    if let Some(a) = accounts.selected_elyby() {
+        account::elyby::restore(account::store(), a)?;
+        log(format!(
+            "Ely.by session verified: downloading Minecraft {} resources from Mojang",
+            pins.version
+        ));
+        return download_resources(pins, dir, fetch, log);
+    }
     // The strict gate, never `launch_for_game`: the developer option that lets offline names
     // play without an owner must not download the game for them.
     let pass = account::launch(
@@ -1326,12 +1334,7 @@ fn download_for(
             log(format!(
                 "{name} owns Minecraft: downloading {v} from Mojang"
             ));
-            let os = match sources::Os::current() {
-                sources::Os::Linux => "linux",
-                sources::Os::MacOs => "osx",
-                sources::Os::Windows => "windows",
-            };
-            mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log).map_err(|e| {
+            download_resources(pins, dir, fetch, log).map_err(|e| {
                 format!("\n  • Horizon tried to download {v} from Mojang for {name}, but: {e}")
             })
         }
@@ -1350,6 +1353,20 @@ fn download_for(
              downloads {v} from Mojang itself."
         )),
     }
+}
+
+fn download_resources(
+    pins: &sources::Pins,
+    dir: &Path,
+    fetch: sources::Fetch,
+    log: &dyn Fn(String),
+) -> Result<(), String> {
+    let os = match sources::Os::current() {
+        sources::Os::Linux => "linux",
+        sources::Os::MacOs => "osx",
+        sources::Os::Windows => "windows",
+    };
+    mojang::download(pins, dir, os, 8, fetch, &mojang::CANCEL, log)
 }
 
 /// The Java home for this version: a runtime for precompiled exporters, a JDK for older
@@ -2093,7 +2110,7 @@ pub fn client(tag: &str) -> Result<Command, String> {
     crate::browser::horizon::before_play(&game_home());
     let mut cmd = client_command(tag);
     if let Some(file) = session {
-        cmd.arg("--session-file").arg(file);
+        account::attach_session(&mut cmd, &file)?;
     }
     if let Some(e) = offline {
         eprintln!("Playing offline: {e}");
@@ -2214,6 +2231,7 @@ impl Logged {
 pub struct Updates {
     pub horizon: Option<Release>,
     pub launcher: Option<Release>,
+    pub launcher_error: Option<String>,
 }
 
 /// The newest Horizon build with a build here (the current Nightly), if it isn't installed and
@@ -2248,7 +2266,16 @@ fn launcher_update_from(releases: &[Release], own: &str) -> Option<Release> {
 pub fn releases_and_updates(
     on_releases: impl FnOnce(Result<Vec<Release>, String>),
 ) -> Result<Updates, String> {
-    releases_and_updates_with(release_list, installed, launcher_releases_in, on_releases)
+    let mut updates =
+        releases_and_updates_with(release_list, installed, launcher_releases_in, on_releases)?;
+    match crate::elyby_updates::check() {
+        Ok(release) => updates.launcher = release,
+        Err(e) => {
+            updates.launcher = None;
+            updates.launcher_error = Some(e);
+        }
+    }
+    Ok(updates)
 }
 
 fn releases_and_updates_with(
@@ -2270,6 +2297,7 @@ fn releases_and_updates_with(
     Ok(Updates {
         horizon,
         launcher: launcher_update(&launchers(&list)),
+        launcher_error: None,
     })
 }
 
@@ -2333,7 +2361,8 @@ pub fn exe_path() -> &'static Path {
 
 /// Development builds and `HORIZON_LAUNCHER_NO_SELF_UPDATE` never replace themselves.
 pub fn self_update_allowed() -> bool {
-    !cfg!(debug_assertions) && std::env::var_os("HORIZON_LAUNCHER_NO_SELF_UPDATE").is_none()
+    crate::elyby_updates::repository().is_some()
+        && std::env::var_os("HORIZON_LAUNCHER_NO_SELF_UPDATE").is_none()
 }
 
 /// The version in `horizon-launcher --version`'s output (`horizon-launcher 0.1.5`).
@@ -2361,7 +2390,7 @@ fn installed_launcher_version(path: &Path) -> Option<String> {
 /// update in the same run failed with "No such file or directory". Windows keeps a running
 /// binary locked, so there `self_replace` moves it aside first.
 #[cfg(unix)]
-fn replace_binary(new: &Path, exe: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_binary(new: &Path, exe: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let dir = exe.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "the launcher has no folder")
@@ -2379,7 +2408,7 @@ fn replace_binary(new: &Path, exe: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn replace_binary(new: &Path, _exe: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_binary(new: &Path, _exe: &Path) -> std::io::Result<()> {
     self_replace::self_replace(new)
 }
 
@@ -2487,6 +2516,9 @@ fn replace_bundle(_new: &Path, _app: &Path) -> Result<(), String> {
 /// keeps working; `restart` starts the new one. When the file there already is that release or
 /// a newer one (updated from the command line or another window), there is nothing to do.
 pub fn self_update(release: &Release, progress: impl Fn(f32)) -> Result<(), String> {
+    if release.tag.contains("-elyby.") {
+        return crate::elyby_updates::install(release, progress);
+    }
     let (url, size) = release
         .asset
         .clone()
@@ -2530,7 +2562,7 @@ pub fn self_update(release: &Release, progress: impl Fn(f32)) -> Result<(), Stri
     Ok(())
 }
 
-fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
     for entry in fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -2697,6 +2729,7 @@ impl Running {
 }
 
 pub fn spawn(job: Job, mut cmd: Command, tx: Sender<Msg>) -> Result<Running, String> {
+    let discovery = crate::elyby_discovery::configure(&mut cmd)?;
     crate::process::hide_console(&mut cmd);
     let mut child = cmd
         .stdin(Stdio::piped())
@@ -2740,6 +2773,7 @@ pub fn spawn(job: Job, mut cmd: Command, tx: Sender<Msg>) -> Result<Running, Str
             Err(e) => Err(e.to_string()),
         };
         let _ = tx.send(Msg::Exit(job, result));
+        drop(discovery);
     });
     Ok(Running { child, stdin })
 }
@@ -3054,7 +3088,9 @@ mod tests {
             let start = backend.find(&format!("\nfn {f}(")).unwrap();
             &backend[start..start + backend[start + 1..].find("\n}\n").unwrap()]
         };
-        assert!(body("download_for").contains("mojang::download("));
+        assert!(body("download_resources").contains("mojang::download("));
+        assert!(body("download_for").contains("download_resources("));
+        assert!(body("download_for_owner").contains("account::elyby::restore("));
         assert!(body("download_for_owner").contains("account::launch("));
         assert!(!body("download_for_owner").contains("launch_for_game("));
         // `download_for` is defined once and called once, by `download_for_owner`.

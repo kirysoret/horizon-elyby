@@ -17,6 +17,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub mod elyby;
+
 /// The keychain service name every secret is stored under.
 pub const SERVICE: &str = "dev.playhorizon.launcher";
 const SCOPE: &str = "XboxLive.signin offline_access";
@@ -759,6 +761,10 @@ pub fn store() -> &'static dyn SecretStore {
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Accounts {
     pub accounts: Vec<Account>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elyby: Vec<Account>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elyby_selected: Option<String>,
     /// The UUID of the account the game starts with; none plays offline.
     pub selected: Option<String>,
     /// Offline names the player keeps, to switch between (`--name`): no account, no skin.
@@ -778,6 +784,7 @@ pub struct Accounts {
 pub enum Player {
     /// A Microsoft account, by UUID.
     Microsoft(String),
+    ElyBy(String),
     /// An offline name.
     Offline(String),
     /// Offline as the name the game made up.
@@ -843,6 +850,7 @@ impl Accounts {
             &serde_json::to_string(secrets).map_err(|e| e.to_string())?,
         )?;
         self.selected = Some(account.uuid.clone());
+        self.elyby_selected = None;
         match self.accounts.iter_mut().find(|a| a.uuid == account.uuid) {
             Some(a) => *a = account,
             None => self.accounts.push(account),
@@ -859,6 +867,9 @@ impl Accounts {
 
     /// Who plays now.
     pub fn player(&self) -> Player {
+        if let Some(a) = self.selected_elyby() {
+            return Player::ElyBy(a.uuid.clone());
+        }
         match (self.selected(), &self.offline_selected) {
             (Some(a), _) => Player::Microsoft(a.uuid.clone()),
             (None, Some(name)) => Player::Offline(name.clone()),
@@ -882,6 +893,14 @@ impl Accounts {
         offline_without_owner: bool,
     ) -> Result<(), String> {
         match who {
+            Player::ElyBy(uuid) => {
+                if !self.elyby.iter().any(|a| a.uuid == uuid) {
+                    return Err("That Ely.by account isn't signed in.".into());
+                }
+                self.elyby_selected = Some(uuid);
+                self.selected = None;
+                return Ok(());
+            }
             Player::Microsoft(uuid) => {
                 if !self.accounts.iter().any(|a| a.uuid == uuid) {
                     return Err("That account isn't signed in.".into());
@@ -901,6 +920,7 @@ impl Accounts {
                 self.offline_selected = None;
             }
         }
+        self.elyby_selected = None;
         Ok(())
     }
 
@@ -957,6 +977,9 @@ impl Accounts {
 
     /// The game's `--name` for this run: the offline name, when one plays.
     pub fn name_arg(&self) -> Option<&str> {
+        if self.selected_elyby().is_some() {
+            return None; // The real Ely.by name and UUID arrive together in the session file.
+        }
         match self.selected() {
             Some(_) => None,
             None => self.offline_selected.as_deref(),
@@ -1077,6 +1100,13 @@ pub fn launch_for_game(
     accounts: &mut Accounts,
     offline_without_owner: bool,
 ) -> Result<Launch, NoOwner> {
+    if let Some(a) = accounts.selected_elyby().cloned() {
+        let secrets = elyby::session(store, &a).map_err(|_| NoOwner)?;
+        return Ok(Launch {
+            session: Some((a, secrets)),
+            ..Launch::default()
+        });
+    }
     match launch(ep, client_id, store, accounts) {
         Err(NoOwner) if offline_without_owner => Ok(Launch::default()),
         pass => pass,
@@ -1089,6 +1119,15 @@ pub fn write_session_file(
     dir: &Path,
     account: &Account,
     secrets: &Secrets,
+) -> Result<PathBuf, String> {
+    write_session_file_for(dir, account, secrets, "microsoft")
+}
+
+fn write_session_file_for(
+    dir: &Path,
+    account: &Account,
+    secrets: &Secrets,
+    provider: &str,
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     // Leftovers of games that never started (refused by the game after two minutes anyway).
@@ -1119,10 +1158,32 @@ pub fn write_session_file(
         "uuid": account.uuid,
         "access_token": secrets.minecraft_token,
         "user_type": "msa",
+        // Legacy native clients require the msa-shaped transport format, independently of
+        // token issuer. This explicit provider configures discovery BEFORE the game starts.
+        "auth_provider": provider,
         "xuid": secrets.xuid,
     });
     std::io::Write::write_all(&mut file, body.to_string().as_bytes()).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Route the session through its issuer, fail closed if its metadata cannot be read.
+pub fn attach_session(cmd: &mut std::process::Command, file: &Path) -> Result<(), String> {
+    let body: Value = std::fs::read(file)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .ok_or("Could not read the account session. Sign in again.")?;
+    let provider = match body.get("auth_provider") {
+        None => "microsoft",
+        Some(value) => value.as_str().ok_or("Invalid account provider.")?,
+    };
+    if !matches!(provider, "microsoft" | "elyby") {
+        return Err("Unknown account provider.".into());
+    }
+    cmd.env(crate::elyby_discovery::PROVIDER_ENV, provider)
+        .arg("--session-file")
+        .arg(file);
+    Ok(())
 }
 
 /// Where a background sign-in is (the window and the MCP server show it).
@@ -1194,8 +1255,14 @@ pub fn session_for_game(
     let Some((account, secrets)) = pass.session else {
         return Ok((None, pass.offline));
     };
-    match write_session_file(&game_home.join("sessions"), &account, &secrets) {
+    let provider = if accounts.selected_elyby().is_some() {
+        "elyby"
+    } else {
+        "microsoft"
+    };
+    match write_session_file_for(&game_home.join("sessions"), &account, &secrets, provider) {
         Ok(file) => Ok((Some(file), None)),
+        Err(_) if provider == "elyby" => Err(NoOwner),
         Err(e) => Ok((None, Some(e))),
     }
 }

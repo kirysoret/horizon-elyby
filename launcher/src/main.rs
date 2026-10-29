@@ -14,6 +14,7 @@ mod console_page;
 mod cull;
 mod datapacks_page;
 mod dev_options;
+mod elyby_page;
 mod export_page;
 mod game_tools;
 mod import_page;
@@ -211,6 +212,8 @@ struct Launcher {
     accounts: Accounts,
     sign_in: Option<SignIn>,
     sign_in_state: Option<SignInState>,
+    elyby_job: Option<Receiver<Result<String, String>>>,
+    elyby_status: Option<Result<String, String>>,
     keychain: bool,
     /// Whether an account here owns the game, by the keychain's last answers (the owner gate);
     /// none until the keychain has been read.
@@ -428,6 +431,8 @@ impl Launcher {
             accounts: Accounts::load(),
             sign_in: None,
             sign_in_state: None,
+            elyby_job: None,
+            elyby_status: None,
             keychain: true,
             owner: None,
             owner_screen_open: false,
@@ -683,6 +688,13 @@ impl Launcher {
                         let (file, offline) = match session {
                             Ok(pass) => pass,
                             Err(account::NoOwner) => {
+                                if self.accounts.selected_elyby().is_some() {
+                                    self.client_error = Some("Could not validate the Ely.by session. Check your connection or sign in again in Settings > Ely.by.".into());
+                                    self.starting_pack = None;
+                                    self.joining = None;
+                                    self.quick_play = None;
+                                    continue;
+                                }
                                 self.owner = Some(false);
                                 self.owner_screen_open = true;
                                 self.client_error = Some(format!("{}.", tr(account::NEEDS_OWNER)));
@@ -693,11 +705,14 @@ impl Launcher {
                             }
                         };
                         // Past the gate by the developer option alone is no owner.
-                        if !self.settings.dev_offline {
+                        if !self.settings.dev_offline && self.accounts.selected_elyby().is_none() {
                             self.owner = Some(true);
                         }
                         if let Some(file) = file {
-                            cmd.arg("--session-file").arg(file);
+                            if let Err(e) = account::attach_session(&mut cmd, &file) {
+                                self.client_error = Some(e);
+                                continue;
+                            }
                         }
                         // Still play, offline, and say why.
                         if let Some(e) = offline {
@@ -952,6 +967,7 @@ impl Launcher {
         }
         changed |= self.servers_tick();
         changed |= self.mods_tick();
+        changed |= self.elyby_tick();
         if let Some(sign_in) = &self.sign_in {
             let state = sign_in.state();
             let changed_state = format!("{state:?}") != format!("{:?}", self.sign_in_state);
@@ -2310,7 +2326,12 @@ impl Launcher {
                     .top(px(17.))
                     .child(blocks::icon("play", 22., t.on_face)),
             );
-        match play_press(prepared, self.owner, self.preparing || running) {
+        let resource_access = if self.accounts.selected_elyby().is_some() {
+            Some(true)
+        } else {
+            self.owner
+        };
+        match play_press(prepared, resource_access, self.preparing || running) {
             PlayPress::Nothing => play = disabled(play),
             PlayPress::Play => {
                 play = play.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -2352,7 +2373,11 @@ impl Launcher {
         // Not prepared: an owner can have Horizon download Minecraft from Mojang; without an
         // owner there is nothing to play, so signing in comes first.
         let first = (!prepared && !self.preparing)
-            .then_some(self.owner_shown())
+            .then_some(if self.accounts.selected_elyby().is_some() {
+                Some(true)
+            } else {
+                self.owner_shown()
+            })
             .flatten();
         // No launcher folder with Minecraft on this computer: an owner needs none.
         let no_install = self.settings.minecraft_dir.is_none();
@@ -2979,6 +3004,19 @@ impl Launcher {
                 backend::VERSION,
                 trf("the update failed: {error}", &[("error", e)])
             ),
+            SelfUpdate::Idle if horizon_launcher::elyby_updates::repository().is_none() => {
+                format!(
+                    "{} · Ely.by launcher update channel not configured",
+                    backend::VERSION
+                )
+            }
+            SelfUpdate::Idle if self.updates.launcher_error.is_some() => {
+                format!(
+                    "{} · {}",
+                    backend::VERSION,
+                    self.updates.launcher_error.as_deref().unwrap_or_default()
+                )
+            }
             SelfUpdate::Idle => match &self.updates.launcher {
                 Some(r) => format!(
                     "{}  ·  {}",
@@ -3019,6 +3057,7 @@ impl Launcher {
         let mono = |s: String| div().font_family(theme::MONO).child(s).into_any_element();
         let plain = |s: &str| div().child(tr(s).to_string()).into_any_element();
         let (accounts, n) = self.account_rows(cx);
+        let (elyby, n) = self.elyby_rows(n, cx);
         let (offline, n) = self.offline_rows(n, cx);
         let appearance = segments(
             "appearance",
@@ -3060,6 +3099,7 @@ impl Launcher {
                     .flex_col()
                     .child(group("Account", "user").mt_0())
                     .child(accounts)
+                    .child(elyby)
                     .child(offline)
                     .child(group("Updates", "reload"))
                     .child(index_row(

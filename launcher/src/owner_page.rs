@@ -17,6 +17,9 @@ impl Launcher {
     /// `owner` as the window shows it: the developer option that lets offline names play without
     /// an owner (`dev_options`) hides the gate, as if the keychain hadn't answered yet.
     pub(crate) fn owner_shown(&self) -> Option<bool> {
+        if self.accounts.selected_elyby().is_some() {
+            return None;
+        }
         match self.owner {
             Some(false) if self.settings.dev_offline => None,
             owner => owner,

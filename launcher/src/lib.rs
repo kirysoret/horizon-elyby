@@ -6,6 +6,8 @@ pub mod browser;
 pub mod datapacks;
 pub mod desktop;
 pub mod desktop_seams;
+pub mod elyby_discovery;
+pub mod elyby_updates;
 pub mod export;
 #[cfg(unix)]
 pub mod game_app;

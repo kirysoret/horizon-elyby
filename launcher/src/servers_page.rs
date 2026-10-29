@@ -47,10 +47,16 @@ pub(super) enum Field {
     /// Settings' new offline name (`switch_page.rs`).
     OfflineName,
     DeleteServer,
+    ElyLogin,
+    ElyPassword,
+    ElyCode,
 }
 
 impl Field {
-    const ALL: [Field; 19] = [
+    const ALL: [Field; 22] = [
+        Field::ElyLogin,
+        Field::ElyPassword,
+        Field::ElyCode,
         Field::Name,
         Field::Seed,
         Field::Players,
@@ -947,7 +953,7 @@ impl Launcher {
         let value = self.servers.value(f).to_string();
         let shown: String = {
             let chars: Vec<char> = value.chars().collect();
-            if f == Field::Token {
+            if matches!(f, Field::Token | Field::ElyPassword | Field::ElyCode) {
                 "•".repeat(chars.len().min(40))
             } else {
                 chars[chars.len().saturating_sub(60)..].iter().collect()
@@ -1026,7 +1032,13 @@ impl Launcher {
                     }
                     Key::Paste => {
                         if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                            let line = text.lines().next().unwrap_or_default().trim().to_string();
+                            let line = text.lines().next().unwrap_or_default();
+                            let line = if f == Field::ElyPassword {
+                                line
+                            } else {
+                                line.trim()
+                            }
+                            .to_string();
                             this.servers.text(f).push_str(&line);
                         }
                     }
@@ -1076,6 +1088,7 @@ impl Launcher {
             }
             Field::Port => self.save_port(),
             Field::Token => self.save_token(),
+            Field::ElyLogin | Field::ElyPassword | Field::ElyCode => self.start_elyby(),
             Field::Email => self.invite_friend(),
             Field::InstanceName
             | Field::InstanceGroup
