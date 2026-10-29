@@ -608,7 +608,7 @@ fn session_files_are_private_and_complete() {
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(
         v,
-        json!({"name": "Notch", "uuid": UUID, "access_token": "mc-token", "user_type": "msa", "xuid": "25"})
+        json!({"name": "Notch", "uuid": UUID, "access_token": "mc-token", "user_type": "msa", "auth_provider":"microsoft", "xuid": "25"})
     );
     // The refresh token never leaves the keychain.
     assert!(!v.to_string().contains("\"r\""));
@@ -703,4 +703,36 @@ fn offline_names_switch_with_accounts() {
         serde_json::to_string(&old).unwrap(),
         r#"{"accounts":[],"selected":null}"#
     );
+}
+
+#[test]
+fn session_provider_is_explicit_and_invalid_issuers_fail_closed() {
+    let dir = std::env::temp_dir().join(format!("horizon-session-provider-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("session.json");
+    for (body, expected) in [
+        (json!({"auth_provider":"elyby"}), Some("elyby")),
+        (json!({"auth_provider":"microsoft"}), Some("microsoft")),
+        (json!({}), Some("microsoft")),
+        (json!({"auth_provider":null}), None),
+        (json!({"auth_provider":"unknown"}), None),
+    ] {
+        std::fs::write(&file, body.to_string()).unwrap();
+        let mut cmd = std::process::Command::new("horizon-client");
+        let result = attach_session(&mut cmd, &file);
+        if let Some(provider) = expected {
+            result.unwrap();
+            let actual = cmd
+                .get_envs()
+                .find(|(k, _)| *k == crate::elyby_discovery::PROVIDER_ENV)
+                .unwrap()
+                .1
+                .unwrap();
+            assert_eq!(actual, provider);
+        } else {
+            assert!(result.is_err());
+            assert!(cmd.get_args().next().is_none());
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
