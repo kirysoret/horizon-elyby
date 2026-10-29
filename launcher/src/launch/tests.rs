@@ -193,3 +193,23 @@ fn the_linux_switches_act_only_where_their_tools_are() {
     let text = serde_json::to_string(&Launch::default()).unwrap();
     assert_eq!(text, "{}");
 }
+
+#[test]
+fn instance_environment_cannot_change_session_issuer() {
+    let mut game = Command::new("horizon-client");
+    game.env(crate::elyby_discovery::PROVIDER_ENV, "elyby");
+    let mut launch = Launch::default();
+    launch.env.insert(
+        crate::elyby_discovery::PROVIDER_ENV.into(),
+        "microsoft".into(),
+    );
+    let out = wrap(game, &launch);
+    assert_eq!(
+        out.get_envs()
+            .find(|(k, _)| *k == crate::elyby_discovery::PROVIDER_ENV)
+            .unwrap()
+            .1
+            .unwrap(),
+        "elyby"
+    );
+}
