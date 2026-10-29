@@ -73,3 +73,6 @@ winresource = "0.1"
 
 [profile.release]
 strip = true
+
+[dev-dependencies]
+horizon-protocol = { path = "../crates/horizon-protocol" }
